@@ -71,7 +71,7 @@ async def post_puzzle():
         print("No puzzles found in /puzzles folder")
         return
     date_str = datetime.now(pytz.timezone(POST_TIMEZONE)).strftime("%m/%d/%y")
-    message = f"♟️ **Daily Puzzle ({date_str})**\nWhite to move — can you find the best continuation?"
+    message = f"♟️ **Daily Puzzle ({date_str})**\nGood luck!"
     await channel.send(message, file=discord.File(puzzle_path))
     print(f"Posted: {puzzle_path}")
 
