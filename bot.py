@@ -10,7 +10,15 @@ import pytz
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+_channel_raw = os.getenv("CHANNEL_ID")
+if not TOKEN or not TOKEN.strip():
+    raise SystemExit("Set DISCORD_TOKEN in Railway Variables (or .env locally).")
+if not _channel_raw or not _channel_raw.strip():
+    raise SystemExit("Set CHANNEL_ID in Railway Variables (or .env locally).")
+try:
+    CHANNEL_ID = int(_channel_raw.strip())
+except ValueError as e:
+    raise SystemExit(f"CHANNEL_ID must be an integer (no quotes). Got: {_channel_raw!r}") from e
 PUZZLES_DIR = "puzzles"
 # Eastern Time (EST/EDT): same wall clock as Toronto; DST handled automatically.
 POST_TIMEZONE = os.getenv("POST_TIMEZONE", "America/New_York")
