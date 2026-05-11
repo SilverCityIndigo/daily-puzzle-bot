@@ -22,6 +22,14 @@ except ValueError as e:
 PUZZLES_DIR = "puzzles"
 # Eastern Time (EST/EDT): same wall clock as Toronto; DST handled automatically.
 POST_TIMEZONE = os.getenv("POST_TIMEZONE", "America/New_York")
+# Daily post time when not in application-id test mode (see TEST_APPLICATION_ID).
+POST_HOUR = int(os.getenv("POST_HOUR", "9"))
+POST_MINUTE = int(os.getenv("POST_MINUTE", "0"))
+# If TEST_APPLICATION_ID matches this bot's user id (same as Application ID in the portal),
+# use TEST_POST_HOUR / TEST_POST_MINUTE instead. Omit on Railway so production stays on POST_HOUR.
+TEST_APPLICATION_ID = os.getenv("TEST_APPLICATION_ID", "").strip()
+TEST_POST_HOUR = int(os.getenv("TEST_POST_HOUR", "1"))
+TEST_POST_MINUTE = int(os.getenv("TEST_POST_MINUTE", "0"))
 # On Railway, mount a volume and set e.g. TRACKER_FILE=/data/tracker.json so the puzzle index survives redeploys.
 TRACKER_FILE = os.getenv("TRACKER_FILE", "tracker.json")
 
@@ -70,10 +78,19 @@ async def post_puzzle():
 @post_puzzle.before_loop
 async def before_puzzle():
     await client.wait_until_ready()
-    # Wait until next 9:00 AM in POST_TIMEZONE (default US Eastern).
+    tid = TEST_APPLICATION_ID
+    if tid and client.user and str(client.user.id) == tid:
+        hour, minute = TEST_POST_HOUR, TEST_POST_MINUTE
+        print(
+            f"Test schedule: next post at {hour:02d}:{minute:02d} "
+            f"({POST_TIMEZONE}) — TEST_APPLICATION_ID matches this bot"
+        )
+    else:
+        hour, minute = POST_HOUR, POST_MINUTE
+        print(f"Production schedule: next post at {hour:02d}:{minute:02d} ({POST_TIMEZONE})")
     tz = pytz.timezone(POST_TIMEZONE)
     now = datetime.now(tz)
-    target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if now >= target:
         target += timedelta(days=1)
     wait_seconds = (target - now).total_seconds()
