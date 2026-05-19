@@ -2,6 +2,7 @@ import asyncio
 import discord
 import os
 import json
+import re
 from discord.ext import tasks
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -43,19 +44,41 @@ def save_tracker(data):
     with open(TRACKER_FILE, "w") as f:
         json.dump(data, f)
 
+def _natural_sort_key(name: str):
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
+
+def list_puzzle_files():
+    """Sorted puzzle filenames (p01 before p10). Only files in puzzles/ on disk."""
+    return sorted(
+        (
+            f
+            for f in os.listdir(PUZZLES_DIR)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ),
+        key=_natural_sort_key,
+    )
+
 def get_next_puzzle():
-    puzzles = sorted([
-        f for f in os.listdir(PUZZLES_DIR)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ])
+    puzzles = list_puzzle_files()
     if not puzzles:
         return None
     tracker = get_tracker()
-    next_index = tracker["last_index"] + 1
+    last_index = tracker.get("last_index", -1)
+    next_index = last_index + 1
+    wrapped = False
     if next_index >= len(puzzles):
+        wrapped = True
         next_index = 0
-    save_tracker({"last_index": next_index})
-    return os.path.join(PUZZLES_DIR, puzzles[next_index])
+    filename = puzzles[next_index]
+    save_tracker({"last_index": next_index, "last_file": filename})
+    path = os.path.join(PUZZLES_DIR, filename)
+    if wrapped:
+        print(
+            f"Reached end of {len(puzzles)} puzzle(s); starting over at {filename}. "
+            "Add more images to puzzles/ and push to GitHub to extend the run."
+        )
+    print(f"Posting puzzle {next_index + 1}/{len(puzzles)}: {filename}")
+    return path
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
@@ -100,6 +123,15 @@ async def before_puzzle():
 @client.event
 async def on_ready():
     print(f"Daily Flow is online as {client.user}")
+    puzzles = list_puzzle_files()
+    if puzzles:
+        print(f"Loaded {len(puzzles)} puzzle(s): {', '.join(puzzles)}")
+        tracker = get_tracker()
+        last = tracker.get("last_file")
+        if last:
+            print(f"Last posted: {last} (index {tracker.get('last_index', -1)})")
+    else:
+        print("Warning: no puzzle images in puzzles/ — posts will be skipped")
     post_puzzle.start()
 
 client.run(TOKEN)
