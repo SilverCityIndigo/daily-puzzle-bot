@@ -122,6 +122,27 @@ async def before_puzzle():
     print(f"First puzzle posts in {wait_seconds/3600:.1f} hours")
     await asyncio.sleep(wait_seconds)
 
+async def post_next_puzzle_once():
+    """Post the next puzzle in sequence once (same tracker step as the daily job)."""
+    channel = client.get_channel(CHANNEL_ID)
+    if channel is None:
+        raise SystemExit(f"Channel {CHANNEL_ID} not found. Is the bot in this server?")
+    tracker = get_tracker()
+    print(
+        f"Tracker before post: last_index={tracker.get('last_index', -1)}, "
+        f"last_file={tracker.get('last_file', '(none)')}"
+    )
+    puzzle_path = get_next_puzzle()
+    if puzzle_path is None:
+        raise SystemExit("No puzzles found in puzzles/")
+    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
+    after = get_tracker()
+    print(f"Posted: {puzzle_path}")
+    print(
+        f"Tracker after post: last_index={after.get('last_index')}, "
+        f"last_file={after.get('last_file')}"
+    )
+
 async def replace_post(message_id: int):
     """
     Delete a mistaken daily post and send the next puzzle in sequence once.
@@ -156,16 +177,33 @@ async def replace_post(message_id: int):
     )
     print("Tomorrow's automatic post will continue from the next file after this one.")
 
-async def run_replace_cli(message_id: int):
+async def run_one_shot_cli(action):
     @client.event
     async def on_ready():
         try:
-            await replace_post(message_id)
+            await action()
         finally:
             await client.close()
 
     async with client:
         await client.start(TOKEN)
+
+def cmd_set_tracker(index: int, filename: str):
+    puzzles = list_puzzle_files()
+    if not puzzles:
+        raise SystemExit("No puzzles in puzzles/")
+    if index < -1 or index >= len(puzzles):
+        raise SystemExit(f"index must be -1 .. {len(puzzles) - 1}; have {len(puzzles)} file(s)")
+    if filename not in puzzles:
+        raise SystemExit(f"{filename!r} not in puzzle list: {puzzles}")
+    if puzzles[index] != filename:
+        raise SystemExit(f"At index {index} expected {puzzles[index]!r}, got {filename!r}")
+    save_tracker({"last_index": index, "last_file": filename})
+    print(f"Tracker set: last_index={index}, last_file={filename}")
+    if index + 1 < len(puzzles):
+        print(f"Next post will be: {puzzles[index + 1]}")
+    else:
+        print(f"Next post will wrap to: {puzzles[0]}")
 
 def run_scheduled_bot():
     @client.event
@@ -187,7 +225,12 @@ def run_scheduled_bot():
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) >= 3 and sys.argv[1] == "replace":
-        asyncio.run(run_replace_cli(int(sys.argv[2])))
+    if len(sys.argv) >= 2 and sys.argv[1] == "post-now":
+        asyncio.run(run_one_shot_cli(post_next_puzzle_once))
+    elif len(sys.argv) >= 3 and sys.argv[1] == "replace":
+        message_id = int(sys.argv[2])
+        asyncio.run(run_one_shot_cli(lambda: replace_post(message_id)))
+    elif len(sys.argv) >= 4 and sys.argv[1] == "set-tracker":
+        cmd_set_tracker(int(sys.argv[2]), sys.argv[3])
     else:
         run_scheduled_bot()
