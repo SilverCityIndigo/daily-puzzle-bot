@@ -143,6 +143,17 @@ async def post_next_puzzle_once():
         f"last_file={after.get('last_file')}"
     )
 
+async def delete_bot_message(message_id: int):
+    """Delete a message this bot sent. Does not change tracker or post a new puzzle."""
+    channel = client.get_channel(CHANNEL_ID)
+    if channel is None:
+        raise SystemExit(f"Channel {CHANNEL_ID} not found.")
+    msg = await channel.fetch_message(message_id)
+    if msg.author.id != client.user.id:
+        raise SystemExit("That message was not sent by this bot — delete it manually in Discord.")
+    await msg.delete()
+    print(f"Deleted message {message_id}")
+
 async def replace_post(message_id: int):
     """
     Delete a mistaken daily post and send the next puzzle in sequence once.
@@ -227,6 +238,9 @@ if __name__ == "__main__":
 
     if len(sys.argv) >= 2 and sys.argv[1] == "post-now":
         asyncio.run(run_one_shot_cli(post_next_puzzle_once))
+    elif len(sys.argv) >= 3 and sys.argv[1] == "delete":
+        message_id = int(sys.argv[2])
+        asyncio.run(run_one_shot_cli(lambda: delete_bot_message(message_id)))
     elif len(sys.argv) >= 3 and sys.argv[1] == "replace":
         message_id = int(sys.argv[2])
         asyncio.run(run_one_shot_cli(lambda: replace_post(message_id)))
