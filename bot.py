@@ -80,6 +80,10 @@ def get_next_puzzle():
     print(f"Posting puzzle {next_index + 1}/{len(puzzles)}: {filename}")
     return path
 
+def daily_message_text():
+    date_str = datetime.now(pytz.timezone(POST_TIMEZONE)).strftime("%m/%d/%y")
+    return f"♟️ **Daily Puzzle ({date_str})**\nGood luck!"
+
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
@@ -93,9 +97,7 @@ async def post_puzzle():
     if puzzle_path is None:
         print("No puzzles found in /puzzles folder")
         return
-    date_str = datetime.now(pytz.timezone(POST_TIMEZONE)).strftime("%m/%d/%y")
-    message = f"♟️ **Daily Puzzle ({date_str})**\nGood luck!"
-    await channel.send(message, file=discord.File(puzzle_path))
+    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
     print(f"Posted: {puzzle_path}")
 
 @post_puzzle.before_loop
@@ -120,18 +122,72 @@ async def before_puzzle():
     print(f"First puzzle posts in {wait_seconds/3600:.1f} hours")
     await asyncio.sleep(wait_seconds)
 
-@client.event
-async def on_ready():
-    print(f"Daily Flow is online as {client.user}")
-    puzzles = list_puzzle_files()
-    if puzzles:
-        print(f"Loaded {len(puzzles)} puzzle(s): {', '.join(puzzles)}")
-        tracker = get_tracker()
-        last = tracker.get("last_file")
-        if last:
-            print(f"Last posted: {last} (index {tracker.get('last_index', -1)})")
-    else:
-        print("Warning: no puzzle images in puzzles/ — posts will be skipped")
-    post_puzzle.start()
+async def replace_post(message_id: int):
+    """
+    Delete a mistaken daily post and send the next puzzle in sequence once.
+    Tracker advances by exactly one step (same as a normal daily post).
+    Run inside Railway SSH so TRACKER_FILE points at the volume.
+    """
+    channel = client.get_channel(CHANNEL_ID)
+    if channel is None:
+        raise SystemExit(f"Channel {CHANNEL_ID} not found. Is the bot in this server?")
+    tracker = get_tracker()
+    print(
+        f"Tracker before replace: last_index={tracker.get('last_index', -1)}, "
+        f"last_file={tracker.get('last_file', '(none)')}"
+    )
+    msg = await channel.fetch_message(message_id)
+    if msg.author.id != client.user.id:
+        raise SystemExit(
+            "That message was not sent by this bot. Delete it manually in Discord, "
+            "then run replace only if you still need to post the next puzzle."
+        )
+    await msg.delete()
+    print(f"Deleted message {message_id}")
+    puzzle_path = get_next_puzzle()
+    if puzzle_path is None:
+        raise SystemExit("No puzzles found in puzzles/")
+    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
+    after = get_tracker()
+    print(f"Posted: {puzzle_path}")
+    print(
+        f"Tracker after replace: last_index={after.get('last_index')}, "
+        f"last_file={after.get('last_file')}"
+    )
+    print("Tomorrow's automatic post will continue from the next file after this one.")
 
-client.run(TOKEN)
+async def run_replace_cli(message_id: int):
+    @client.event
+    async def on_ready():
+        try:
+            await replace_post(message_id)
+        finally:
+            await client.close()
+
+    async with client:
+        await client.start(TOKEN)
+
+def run_scheduled_bot():
+    @client.event
+    async def on_ready():
+        print(f"Daily Flow is online as {client.user}")
+        puzzles = list_puzzle_files()
+        if puzzles:
+            print(f"Loaded {len(puzzles)} puzzle(s): {', '.join(puzzles)}")
+            tracker = get_tracker()
+            last = tracker.get("last_file")
+            if last:
+                print(f"Last posted: {last} (index {tracker.get('last_index', -1)})")
+        else:
+            print("Warning: no puzzle images in puzzles/ — posts will be skipped")
+        post_puzzle.start()
+
+    client.run(TOKEN)
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "replace":
+        asyncio.run(run_replace_cli(int(sys.argv[2])))
+    else:
+        run_scheduled_bot()
