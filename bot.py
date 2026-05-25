@@ -41,6 +41,9 @@ def get_tracker():
         return json.load(f)
 
 def save_tracker(data):
+    parent = os.path.dirname(os.path.abspath(TRACKER_FILE))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(TRACKER_FILE, "w") as f:
         json.dump(data, f)
 
@@ -58,25 +61,67 @@ def list_puzzle_files():
         key=_natural_sort_key,
     )
 
+def resolve_last_index(puzzles: list[str], tracker: dict) -> int:
+    """
+    Index of the last posted puzzle, or -1 if none.
+    Prefer last_file so new puzzles can be added without index drift or redeploy resets.
+    """
+    last_file = tracker.get("last_file")
+    last_index = tracker.get("last_index", -1)
+
+    if last_file and last_file in puzzles:
+        idx = puzzles.index(last_file)
+        if last_index != idx:
+            print(
+                f"Tracker: using last_file {last_file} (index {idx}); "
+                f"stored last_index was {last_index}"
+            )
+        return idx
+
+    if 0 <= last_index < len(puzzles):
+        if last_file:
+            print(
+                f"Warning: last_file {last_file!r} missing from puzzle list; "
+                f"using last_index {last_index} ({puzzles[last_index]})"
+            )
+        return last_index
+
+    if last_file or last_index != -1:
+        print(
+            f"Warning: tracker stale (last_file={last_file!r}, last_index={last_index}); "
+            "starting from the first puzzle"
+        )
+    return -1
+
+def peek_next_filename() -> str | None:
+    puzzles = list_puzzle_files()
+    if not puzzles:
+        return None
+    next_index = resolve_last_index(puzzles, get_tracker()) + 1
+    if next_index >= len(puzzles):
+        return None
+    return puzzles[next_index]
+
 def get_next_puzzle():
     puzzles = list_puzzle_files()
     if not puzzles:
         return None
     tracker = get_tracker()
-    last_index = tracker.get("last_index", -1)
+    last_index = resolve_last_index(puzzles, tracker)
     next_index = last_index + 1
-    wrapped = False
+
     if next_index >= len(puzzles):
-        wrapped = True
-        next_index = 0
+        last_name = puzzles[last_index] if last_index >= 0 else "(none)"
+        print(
+            f"No new puzzle to post: last posted was {last_name}. "
+            f"Add the next image after {puzzles[-1]} to puzzles/ and redeploy. "
+            "Tracker unchanged; will retry on the next scheduled run."
+        )
+        return None
+
     filename = puzzles[next_index]
     save_tracker({"last_index": next_index, "last_file": filename})
     path = os.path.join(PUZZLES_DIR, filename)
-    if wrapped:
-        print(
-            f"Reached end of {len(puzzles)} puzzle(s); starting over at {filename}. "
-            "Add more images to puzzles/ and push to GitHub to extend the run."
-        )
     print(f"Posting puzzle {next_index + 1}/{len(puzzles)}: {filename}")
     return path
 
@@ -95,7 +140,7 @@ async def post_puzzle():
         return
     puzzle_path = get_next_puzzle()
     if puzzle_path is None:
-        print("No puzzles found in /puzzles folder")
+        print("Skipped daily post (no puzzles or sequence exhausted).")
         return
     await channel.send(daily_message_text(), file=discord.File(puzzle_path))
     print(f"Posted: {puzzle_path}")
@@ -214,7 +259,15 @@ def cmd_set_tracker(index: int, filename: str):
     if index + 1 < len(puzzles):
         print(f"Next post will be: {puzzles[index + 1]}")
     else:
-        print(f"Next post will wrap to: {puzzles[0]}")
+        print("Next post will wait until more puzzle images are added.")
+
+def cmd_set_tracker_file(filename: str):
+    puzzles = list_puzzle_files()
+    if not puzzles:
+        raise SystemExit("No puzzles in puzzles/")
+    if filename not in puzzles:
+        raise SystemExit(f"{filename!r} not in puzzle list: {puzzles}")
+    cmd_set_tracker(puzzles.index(filename), filename)
 
 def run_scheduled_bot():
     @client.event
@@ -227,8 +280,20 @@ def run_scheduled_bot():
             last = tracker.get("last_file")
             if last:
                 print(f"Last posted: {last} (index {tracker.get('last_index', -1)})")
+            nxt = peek_next_filename()
+            if nxt:
+                print(f"Next scheduled post: {nxt}")
+            else:
+                print("Next scheduled post: (waiting for more puzzles in puzzles/)")
         else:
             print("Warning: no puzzle images in puzzles/ — posts will be skipped")
+        if os.getenv("RAILWAY_ENVIRONMENT") and TRACKER_FILE == "tracker.json":
+            print(
+                "Warning: TRACKER_FILE is not on a Railway volume — "
+                "progress resets on redeploy. Set TRACKER_FILE=/data/tracker.json "
+                "and mount a volume at /data."
+            )
+        print(f"Tracker path: {os.path.abspath(TRACKER_FILE)}")
         post_puzzle.start()
 
     client.run(TOKEN)
@@ -246,5 +311,18 @@ if __name__ == "__main__":
         asyncio.run(run_one_shot_cli(lambda: replace_post(message_id)))
     elif len(sys.argv) >= 4 and sys.argv[1] == "set-tracker":
         cmd_set_tracker(int(sys.argv[2]), sys.argv[3])
+    elif len(sys.argv) >= 3 and sys.argv[1] == "set-tracker-file":
+        cmd_set_tracker_file(sys.argv[2])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "status":
+        puzzles = list_puzzle_files()
+        tracker = get_tracker()
+        print(f"Tracker file: {os.path.abspath(TRACKER_FILE)}")
+        print(f"Puzzles on disk ({len(puzzles)}): {', '.join(puzzles) if puzzles else '(none)'}")
+        print(
+            f"Last posted: {tracker.get('last_file', '(none)')} "
+            f"(index {tracker.get('last_index', -1)})"
+        )
+        nxt = peek_next_filename()
+        print(f"Next post would be: {nxt or '(none — add more puzzles)'}")
     else:
         run_scheduled_bot()
