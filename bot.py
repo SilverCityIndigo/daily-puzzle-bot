@@ -3,6 +3,7 @@ import discord
 import os
 import json
 import re
+import sys
 from discord.ext import tasks
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -31,27 +32,51 @@ POST_MINUTE = int(os.getenv("POST_MINUTE", "0"))
 TEST_APPLICATION_ID = os.getenv("TEST_APPLICATION_ID", "").strip()
 TEST_POST_HOUR = int(os.getenv("TEST_POST_HOUR", "1"))
 TEST_POST_MINUTE = int(os.getenv("TEST_POST_MINUTE", "0"))
-# On Railway, mount a volume and set e.g. TRACKER_FILE=/data/tracker.json so the puzzle index survives redeploys.
-TRACKER_FILE = os.getenv("TRACKER_FILE", "tracker.json")
+
+
+def _default_tracker_file() -> str:
+    explicit = os.getenv("TRACKER_FILE", "").strip()
+    if explicit:
+        return explicit
+    # Railway containers wipe the app filesystem on redeploy; persist on a mounted volume.
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        return "/data/tracker.json"
+    return "tracker.json"
+
+
+TRACKER_FILE = _default_tracker_file()
+
 
 def get_tracker():
     if not os.path.exists(TRACKER_FILE):
         return {"last_index": -1}
-    with open(TRACKER_FILE, "r") as f:
+    with open(TRACKER_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
+
 
 def save_tracker(data):
     parent = os.path.dirname(os.path.abspath(TRACKER_FILE))
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(TRACKER_FILE, "w") as f:
-        json.dump(data, f)
+    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
+        try:
+            import fcntl  # Unix only (Railway/Linux)
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
 
 def _natural_sort_key(name: str):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
+
 def list_puzzle_files():
     """Sorted puzzle filenames (p01 before p10). Only files in puzzles/ on disk."""
+    if not os.path.isdir(PUZZLES_DIR):
+        return []
     return sorted(
         (
             f
@@ -60,6 +85,7 @@ def list_puzzle_files():
         ),
         key=_natural_sort_key,
     )
+
 
 def resolve_last_index(puzzles: list[str], tracker: dict) -> int:
     """
@@ -93,6 +119,7 @@ def resolve_last_index(puzzles: list[str], tracker: dict) -> int:
         )
     return -1
 
+
 def peek_next_filename() -> str | None:
     puzzles = list_puzzle_files()
     if not puzzles:
@@ -102,7 +129,12 @@ def peek_next_filename() -> str | None:
         return None
     return puzzles[next_index]
 
-def get_next_puzzle():
+
+def select_next_puzzle():
+    """
+    Choose the next puzzle without updating the tracker.
+    Returns (path, filename, next_index) or None.
+    """
     puzzles = list_puzzle_files()
     if not puzzles:
         return None
@@ -120,17 +152,51 @@ def get_next_puzzle():
         return None
 
     filename = puzzles[next_index]
-    save_tracker({"last_index": next_index, "last_file": filename})
     path = os.path.join(PUZZLES_DIR, filename)
-    print(f"Posting puzzle {next_index + 1}/{len(puzzles)}: {filename}")
-    return path
+    print(f"Next puzzle {next_index + 1}/{len(puzzles)}: {filename}")
+    return path, filename, next_index
+
+
+def commit_posted_puzzle(filename: str, next_index: int):
+    save_tracker({"last_index": next_index, "last_file": filename})
+
+
+def rewind_tracker_one():
+    """Undo the last tracker advance (e.g. before re-posting after a mistaken daily)."""
+    puzzles = list_puzzle_files()
+    if not puzzles:
+        return
+    tracker = get_tracker()
+    last_index = resolve_last_index(puzzles, tracker)
+    if last_index <= 0:
+        if os.path.exists(TRACKER_FILE):
+            os.remove(TRACKER_FILE)
+        print("Tracker cleared (no puzzles posted yet).")
+        return
+    prev = last_index - 1
+    save_tracker({"last_index": prev, "last_file": puzzles[prev]})
+    print(f"Tracker rewound to {puzzles[prev]} (index {prev})")
+
 
 def daily_message_text():
     date_str = datetime.now(pytz.timezone(POST_TIMEZONE)).strftime("%m/%d/%y")
     return f"♟️ **Daily Puzzle ({date_str})**\nGood luck!"
 
+
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+
+
+async def send_next_puzzle(channel):
+    selection = select_next_puzzle()
+    if selection is None:
+        return None
+    path, filename, next_index = selection
+    await channel.send(daily_message_text(), file=discord.File(path))
+    commit_posted_puzzle(filename, next_index)
+    print(f"Posted: {path}")
+    return path
+
 
 @tasks.loop(hours=24)
 async def post_puzzle():
@@ -138,12 +204,10 @@ async def post_puzzle():
     if channel is None:
         print("Channel not found")
         return
-    puzzle_path = get_next_puzzle()
-    if puzzle_path is None:
+    result = await send_next_puzzle(channel)
+    if result is None:
         print("Skipped daily post (no puzzles or sequence exhausted).")
-        return
-    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
-    print(f"Posted: {puzzle_path}")
+
 
 @post_puzzle.before_loop
 async def before_puzzle():
@@ -167,6 +231,7 @@ async def before_puzzle():
     print(f"First puzzle posts in {wait_seconds/3600:.1f} hours")
     await asyncio.sleep(wait_seconds)
 
+
 async def post_next_puzzle_once():
     """Post the next puzzle in sequence once (same tracker step as the daily job)."""
     channel = client.get_channel(CHANNEL_ID)
@@ -177,16 +242,15 @@ async def post_next_puzzle_once():
         f"Tracker before post: last_index={tracker.get('last_index', -1)}, "
         f"last_file={tracker.get('last_file', '(none)')}"
     )
-    puzzle_path = get_next_puzzle()
-    if puzzle_path is None:
-        raise SystemExit("No puzzles found in puzzles/")
-    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
+    path = await send_next_puzzle(channel)
+    if path is None:
+        raise SystemExit("No puzzles found in puzzles/ or sequence exhausted.")
     after = get_tracker()
-    print(f"Posted: {puzzle_path}")
     print(
         f"Tracker after post: last_index={after.get('last_index')}, "
         f"last_file={after.get('last_file')}"
     )
+
 
 async def delete_bot_message(message_id: int):
     """Delete a message this bot sent. Does not change tracker or post a new puzzle."""
@@ -199,11 +263,11 @@ async def delete_bot_message(message_id: int):
     await msg.delete()
     print(f"Deleted message {message_id}")
 
+
 async def replace_post(message_id: int):
     """
-    Delete a mistaken daily post and send the next puzzle in sequence once.
-    Tracker advances by exactly one step (same as a normal daily post).
-    Run inside Railway SSH so TRACKER_FILE points at the volume.
+    Delete a mistaken daily post and re-send the puzzle for that slot.
+    Rewinds the tracker by one step first so we do not skip ahead in the sequence.
     """
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
@@ -221,17 +285,17 @@ async def replace_post(message_id: int):
         )
     await msg.delete()
     print(f"Deleted message {message_id}")
-    puzzle_path = get_next_puzzle()
-    if puzzle_path is None:
+    rewind_tracker_one()
+    path = await send_next_puzzle(channel)
+    if path is None:
         raise SystemExit("No puzzles found in puzzles/")
-    await channel.send(daily_message_text(), file=discord.File(puzzle_path))
     after = get_tracker()
-    print(f"Posted: {puzzle_path}")
     print(
         f"Tracker after replace: last_index={after.get('last_index')}, "
         f"last_file={after.get('last_file')}"
     )
     print("Tomorrow's automatic post will continue from the next file after this one.")
+
 
 async def run_one_shot_cli(action):
     @client.event
@@ -243,6 +307,7 @@ async def run_one_shot_cli(action):
 
     async with client:
         await client.start(TOKEN)
+
 
 def cmd_set_tracker(index: int, filename: str):
     puzzles = list_puzzle_files()
@@ -261,6 +326,7 @@ def cmd_set_tracker(index: int, filename: str):
     else:
         print("Next post will wait until more puzzle images are added.")
 
+
 def cmd_set_tracker_file(filename: str):
     puzzles = list_puzzle_files()
     if not puzzles:
@@ -268,6 +334,23 @@ def cmd_set_tracker_file(filename: str):
     if filename not in puzzles:
         raise SystemExit(f"{filename!r} not in puzzle list: {puzzles}")
     cmd_set_tracker(puzzles.index(filename), filename)
+
+
+def warn_tracker_persistence():
+    if not os.getenv("RAILWAY_ENVIRONMENT"):
+        return
+    if TRACKER_FILE == "tracker.json" or not TRACKER_FILE.startswith("/data"):
+        print(
+            "Warning: tracker is not on a Railway volume path — "
+            "progress resets on redeploy. Mount a volume at /data "
+            "(TRACKER_FILE defaults to /data/tracker.json on Railway)."
+        )
+    elif not os.path.isdir(os.path.dirname(TRACKER_FILE)):
+        print(
+            f"Warning: tracker directory {os.path.dirname(TRACKER_FILE)!r} does not exist. "
+            "Mount a Railway volume at /data before the next deploy."
+        )
+
 
 def run_scheduled_bot():
     @client.event
@@ -287,20 +370,14 @@ def run_scheduled_bot():
                 print("Next scheduled post: (waiting for more puzzles in puzzles/)")
         else:
             print("Warning: no puzzle images in puzzles/ — posts will be skipped")
-        if os.getenv("RAILWAY_ENVIRONMENT") and TRACKER_FILE == "tracker.json":
-            print(
-                "Warning: TRACKER_FILE is not on a Railway volume — "
-                "progress resets on redeploy. Set TRACKER_FILE=/data/tracker.json "
-                "and mount a volume at /data."
-            )
+        warn_tracker_persistence()
         print(f"Tracker path: {os.path.abspath(TRACKER_FILE)}")
         post_puzzle.start()
 
     client.run(TOKEN)
 
-if __name__ == "__main__":
-    import sys
 
+if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "post-now":
         asyncio.run(run_one_shot_cli(post_next_puzzle_once))
     elif len(sys.argv) >= 3 and sys.argv[1] == "delete":
@@ -324,5 +401,6 @@ if __name__ == "__main__":
         )
         nxt = peek_next_filename()
         print(f"Next post would be: {nxt or '(none — add more puzzles)'}")
+        warn_tracker_persistence()
     else:
         run_scheduled_bot()
