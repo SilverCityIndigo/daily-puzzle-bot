@@ -4,9 +4,9 @@ The bot advances through `puzzles/p01.png`, `p02.png`, … using a **tracker fil
 
 ## One-time Railway setup
 
-1. **Volume** — In the Railway project, add a volume mounted at `/data`.
-2. **Variables** — You do not need `TRACKER_FILE` if the volume is mounted at `/data`; the bot defaults to `/data/tracker.json` when `RAILWAY_ENVIRONMENT` is set. To override, set `TRACKER_FILE=/data/tracker.json`.
-3. **Redeploy** after the volume exists so the bot can create the tracker on disk.
+1. **Volume** — Open the **worker** service (not the command search) → **Settings** → scroll to **Volumes**. You may already have `worker-volume` on the project canvas. If not, click **Add Volume** and pick a mount path (e.g. `/data`).
+2. **Variables** — With a volume attached, Railway sets `RAILWAY_VOLUME_MOUNT_PATH` automatically. The bot stores the tracker at `{that path}/tracker.json`. You only need `TRACKER_FILE` if you want a custom path.
+3. **Redeploy** after the volume exists, then run `python bot.py set-tracker-file p12.png` (or whatever was last posted) once in Railway Shell.
 
 ## After a bad or duplicate post
 

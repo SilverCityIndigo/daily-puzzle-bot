@@ -38,7 +38,10 @@ def _default_tracker_file() -> str:
     explicit = os.getenv("TRACKER_FILE", "").strip()
     if explicit:
         return explicit
-    # Railway containers wipe the app filesystem on redeploy; persist on a mounted volume.
+    # Railway injects RAILWAY_VOLUME_MOUNT_PATH when a volume is attached to the service.
+    mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if mount:
+        return os.path.join(mount, "tracker.json")
     if os.getenv("RAILWAY_ENVIRONMENT"):
         return "/data/tracker.json"
     return "tracker.json"
@@ -339,16 +342,20 @@ def cmd_set_tracker_file(filename: str):
 def warn_tracker_persistence():
     if not os.getenv("RAILWAY_ENVIRONMENT"):
         return
-    if TRACKER_FILE == "tracker.json" or not TRACKER_FILE.startswith("/data"):
+    mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if TRACKER_FILE == "tracker.json":
         print(
-            "Warning: tracker is not on a Railway volume path — "
-            "progress resets on redeploy. Mount a volume at /data "
-            "(TRACKER_FILE defaults to /data/tracker.json on Railway)."
+            "Warning: tracker is on ephemeral disk — progress resets on redeploy. "
+            "Attach a volume to this service (Settings → Volumes) or set TRACKER_FILE."
+        )
+    elif mount and not TRACKER_FILE.startswith(mount):
+        print(
+            f"Warning: TRACKER_FILE is {TRACKER_FILE!r} but volume mount is {mount!r}."
         )
     elif not os.path.isdir(os.path.dirname(TRACKER_FILE)):
         print(
             f"Warning: tracker directory {os.path.dirname(TRACKER_FILE)!r} does not exist. "
-            "Mount a Railway volume at /data before the next deploy."
+            "Attach a volume to this service in Railway (Settings → Volumes)."
         )
 
 
