@@ -4,9 +4,18 @@ The bot advances through `puzzles/p01.png`, `p02.png`, … using a **tracker fil
 
 ## One-time Railway setup
 
-1. **Volume** — Open the **worker** service (not the command search) → **Settings** → scroll to **Volumes**. You may already have `worker-volume` on the project canvas. If not, click **Add Volume** and pick a mount path (e.g. `/data`).
-2. **Variables** — With a volume attached, Railway sets `RAILWAY_VOLUME_MOUNT_PATH` automatically. The bot stores the tracker at `{that path}/tracker.json`. You only need `TRACKER_FILE` if you want a custom path.
-3. **Redeploy** after the volume exists, then run `python bot.py set-tracker-file p12.png` (or whatever was last posted) once in Railway Shell.
+1. **Volume** — Open the **worker** service → **Settings** → **Volumes**. Mount path should be `/data` (`worker-volume`).
+2. **Redeploy** after the volume exists.
+3. **Sync tracker once** via `railway ssh` (not `railway run` — that runs on your PC):
+
+```bash
+railway ssh
+python scripts/tracker.py set p12.png
+python scripts/tracker.py status
+exit
+```
+
+Use `scripts/tracker.py` in SSH because `python bot.py` needs the Discord package, which is not on the default `python` in the container shell.
 
 ## After a bad or duplicate post
 
